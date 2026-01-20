@@ -34,13 +34,12 @@ struct Route {
 };
 
 struct Solution {
-  int vehicle_count{};
   std::vector<Route> routes{};
   double distance{};
 };
 
 struct Cost {
-  int vehicle_count{};
+  size_t vehicle_count{};
   double distance{};
 
   bool operator<(const Cost& other) const {
@@ -81,28 +80,6 @@ double dist(const Customer& a, const Customer& b) {
   return std::hypot(a.x - b.x, a.y - b.y);
 }
 
-Cost cost(const Solution& s) {
-  return {s.vehicle_count, s.distance};
-}
-
-// TODO
-std::optional<int> can_visit_in_time(int from, int to, int prev_start,
-                                     const std::vector<Customer>& nodes,
-                                     const DistanceMatrix& distance_matrix) {
-  const auto& prev = nodes[from];
-  const auto& next = nodes[to];
-
-  int travel_time = (int)std::ceil(distance_matrix[from][to]);
-  int arrival = prev_start + prev.service_time + travel_time;
-  int out_start_time = std::max(arrival, next.ready_time);
-
-  if (out_start_time <= next.due_date) {
-    return out_start_time;
-  }
-
-  return std::nullopt;
-}
-
 bool is_route_feasible(const NodeList& route,
                        const std::vector<Customer>& nodes,
                        const DistanceMatrix& distance_matrix,
@@ -119,8 +96,6 @@ bool is_route_feasible(const NodeList& route,
 
     current_load += next.demand;
     if (current_load > vehicle_capacity) {
-      // std::println("current_load > vehicle_capacity, {} > {}", current_load,
-      //              vehicle_capacity);
       return false;
     }
 
@@ -129,8 +104,6 @@ bool is_route_feasible(const NodeList& route,
     current_time = std::max(arrival, next.ready_time);
 
     if (current_time > next.due_date && to != 0) {
-      // std::println("current_time > next.due_date, {} > {}", current_time,
-      //              next.due_date);
       return false;
     }
   }
@@ -145,16 +118,19 @@ int compute_start_time(int prev_start, const Customer& prev,
   return std::max(arrival, next.ready_time);
 }
 
-SeedFunction seed_farthest_from_depot = [](auto& nodes, auto& dist,
-                                           auto& unrouted) {
-  int seed = unrouted.front();
-  for (int n : unrouted) {
-    if (dist[0][n] > dist[0][seed]) seed = n;
-  }
-  return seed;
-};
+SeedFunction seed_farthest_from_depot =
+    [](const std::vector<Customer>& nodes,
+       const DistanceMatrix& distance_matrix, const NodeList& unrouted) {
+      int seed = unrouted.front();
+      for (int n : unrouted) {
+        if (distance_matrix[0][n] > distance_matrix[0][seed]) seed = n;
+      }
+      return seed;
+    };
 
-SeedFunction seed_earliest_due_date = [](auto& nodes, auto&, auto& unrouted) {
+SeedFunction seed_earliest_due_date = [](const std::vector<Customer>& nodes,
+                                         const DistanceMatrix& distance_matrix,
+                                         const NodeList& unrouted) {
   int seed = unrouted.front();
   for (int n : unrouted) {
     if (nodes[n].due_date < nodes[seed].due_date) seed = n;
@@ -162,22 +138,25 @@ SeedFunction seed_earliest_due_date = [](auto& nodes, auto&, auto& unrouted) {
   return seed;
 };
 
-SeedFunction seed_first = [](auto& nodes, auto&, auto& unrouted) {
+SeedFunction seed_first = [](const std::vector<Customer>& nodes,
+                             const DistanceMatrix& distance_matrix,
+                             const NodeList& unrouted) {
   int seed = unrouted.front();
   return seed;
 };
 
-// random seed
-auto make_seed_random(std::mt19937& rng) {
-  return [&rng](auto&, auto&, const NodeList& unrouted) {
-    std::uniform_int_distribution<std::size_t> d(0, unrouted.size() - 1);
+SeedFunction seed_random(std::mt19937& rng) {
+  return [&rng](const std::vector<Customer>& nodes, const DistanceMatrix&,
+                const NodeList& unrouted) {
+    std::uniform_int_distribution<size_t> d(0, unrouted.size() - 1);
     return unrouted[d(rng)];
   };
 }
 
 InsertionEvaluationFunction eval_distance_only =
-    [](int customer, const Route& route, std::size_t pos, auto& nodes,
-       auto& distance_matrix, int vehicle_capacity) {
+    [](int customer, const Route& route, std::size_t pos,
+       const std::vector<Customer>& nodes,
+       const DistanceMatrix& distance_matrix, int vehicle_capacity) {
       Insertion ins{customer, pos, 0.0, 0, false};
 
       NodeList tmp = route.nodes;
@@ -195,6 +174,7 @@ InsertionEvaluationFunction eval_distance_only =
 
       ins.distance_delta = delta;
       ins.feasible = true;
+
       return ins;
     };
 
@@ -211,9 +191,11 @@ InsertionEvaluationFunction eval_distance_with_slack =
                            distance_matrix[customer][j] - distance_matrix[i][j];
 
       // load check
+      NodeList tmp = route.nodes;
+      tmp.insert(tmp.begin() + ins.position, ins.customer);
       int current_load = 0;
-      for (std::size_t i = 1; i < route.nodes.size(); ++i) {
-        int to = route.nodes[i];
+      for (std::size_t i = 1; i < tmp.size(); ++i) {
+        int to = tmp[i];
 
         const auto& next = nodes[to];
 
@@ -358,7 +340,11 @@ Route construct_route_l1(const std::vector<Customer>& nodes,
 
     // best->position is where in the route it will be inserted
     route.nodes.insert(route.nodes.begin() + best->position, best->customer);
+    assert(is_route_feasible(route.nodes, nodes, distance_matrix,
+                             vehicle_capacity));
 
+    route.start_times.clear();
+    route.start_times.push_back(0);
     for (int i = 1; i < route.nodes.size(); ++i) {
       int from = route.nodes[i - 1];
       int to = route.nodes[i];
@@ -396,6 +382,11 @@ Solution construct_single_solomon(const std::vector<Customer>& nodes,
   while (!unrouted.empty()) {
     Route route = construct_route_l1(nodes, distance_matrix, unrouted,
                                      vehicle_capacity, pick_seed, eval, better);
+    if (!is_route_feasible(route.nodes, nodes, distance_matrix,
+                           vehicle_capacity)) {
+      std::println("constructed an infeasible route");
+    }
+
     sol.routes.push_back(route);
     sol.distance += route.distance;
   }
@@ -412,7 +403,6 @@ void print_solution(const Solution& sol) {
     std::print("{}: ", i + 1);
 
     for (std::size_t i = 0; i < route.nodes.size(); ++i) {
-      // std::print("{}({})", route.nodes[i], 0);
       std::print("{}({})", route.nodes[i], route.start_times[i]);
 
       if (i + 1 < route.nodes.size()) {
@@ -494,13 +484,6 @@ int main(int argc, char** argv) {
   // std::println("Vehicles: {} (capacity {})", vehicle.count,
   // vehicle.capacity); std::println("Customers parsed: {}", nodes.size());
 
-  // Customer depot = customers.front();
-  // customers.erase(customers.begin());
-
-  // std::vector<Customer> nodes;
-  // nodes.push_back(depot);
-  // nodes.insert(nodes.end(), customers.begin(), customers.end());
-
   const std::size_t n = nodes.size();
   DistanceMatrix distance_matrix(n, std::vector<double>(n));
 
@@ -518,13 +501,45 @@ int main(int argc, char** argv) {
       {seed_earliest_due_date, eval_distance_only, better_distance},
       {seed_earliest_due_date, eval_distance_with_slack,
        better_distance_then_tight},
-      {make_seed_random(rng), eval_distance_only, better_distance},
   };
 
-  Solution greedy =
-      construct_single_solomon(nodes, distance_matrix, vehicle.capacity,
-                               seed_first, eval_distance_only, better_distance);
-  print_solution(greedy);
+  for (int i = 0; i < 20; i++) {
+    configs.emplace_back(seed_random(rng), eval_distance_only,
+                         better_distance);
+  }
+
+  for (int i = 0; i < 20; i++) {
+    configs.emplace_back(seed_random(rng), eval_distance_with_slack,
+                         better_distance_then_tight);
+  }
+
+  std::vector<Solution> greedy_solutions = {};
+  for (const auto& conf : configs) {
+    Solution s =
+        construct_single_solomon(nodes, distance_matrix, vehicle.capacity,
+                                 conf.seed, conf.eval, conf.better);
+    greedy_solutions.push_back(s);
+  }
+
+  std::optional<Solution> best;
+  for (int i = 0; i < greedy_solutions.size(); i++) {
+    Solution s = greedy_solutions[i];
+    if (!best) {
+      best = s;
+    }
+
+    if (s.routes.size() < best->routes.size() ||
+        (s.routes.size() == best->routes.size() &&
+         s.distance < best->distance)) {
+      best = s;
+    }
+
+    std::println("Solution {} has routes.size() {} and distance {}", i,
+                 s.routes.size(), s.distance);
+  }
+
+  std::println("Best solution found:");
+  print_solution(*best);
 
   return 0;
 }
