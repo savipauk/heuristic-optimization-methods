@@ -781,8 +781,8 @@ void print_solution(const Solution& sol) {
 }
 
 int main(int argc, char** argv) {
-  if (argc < 2) {
-    std::println(stderr, "Usage: {} <input.txt>", argv[0]);
+  if (argc < 3) {
+    std::println(stderr, "Usage: {} <input.txt> <1m|5m|un>", argv[0]);
     return 1;
   }
 
@@ -845,8 +845,25 @@ int main(int argc, char** argv) {
 
   assert(vehicle.capacity > 0);
   assert(!nodes.empty());
-  // std::println("Vehicles: {} (capacity {})", vehicle.count,
-  // vehicle.capacity); std::println("Customers parsed: {}", nodes.size());
+  std::println("Vehicles: {} (capacity {})", vehicle.count,
+  vehicle.capacity); std::println("Customers parsed: {}", nodes.size());
+
+  std::chrono::seconds total_seconds = std::chrono::seconds{60};
+  size_t max_generations = std::numeric_limits<size_t>::max();
+
+  std::string_view time_arg{argv[2]};
+  if (time_arg == "1m") {
+    total_seconds = std::chrono::seconds{60};
+    max_generations = std::numeric_limits<size_t>::max();
+  } else if (time_arg == "5m") {
+    total_seconds = std::chrono::seconds{300};
+    max_generations = std::numeric_limits<size_t>::max();
+  } else if (time_arg == "un") {
+    total_seconds = std::chrono::seconds{1200};
+    max_generations = 500000;
+  } else {
+    std::println("invalid time limit. Use: 1m | 5m | un");
+  }
 
   const std::size_t n = nodes.size();
   DistanceMatrix distance_matrix(n, std::vector<double>(n));
@@ -859,7 +876,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  const size_t population_size = 200;
+  const size_t population_size = 100;
   const size_t offspring_per_generation = 100;
 
   std::mt19937 rng{std::random_device{}()};
@@ -874,11 +891,8 @@ int main(int argc, char** argv) {
        better_distance_then_tight},
   };
 
-  for (int i = 0; i < population_size / 2 - 3; i++) {
+  for (int i = 0; i < 10; ++i) {
     configs.emplace_back(seed_random(rng), eval_distance_only, better_distance);
-  }
-
-  for (int i = 0; i < population_size / 2 - 3; i++) {
     configs.emplace_back(seed_random(rng), eval_distance_with_slack,
                          better_distance_then_tight);
   }
@@ -888,23 +902,55 @@ int main(int argc, char** argv) {
 
   auto greedy_start = std::chrono::steady_clock::now();
 
+  int greedy_init_cap_seconds = total_seconds.count() / 4;
+  const auto greedy_deadline =
+      greedy_start + std::chrono::seconds(greedy_init_cap_seconds);
+
   size_t conf_i = 0;
-  while (population.size() < population_size) {
+  while (population.size() < population_size &&
+         std::chrono::steady_clock::now() < greedy_deadline) {
     const auto& conf = configs[conf_i];
     conf_i = (conf_i + 1) % configs.size();
 
     Solution s =
         construct_single_solomon(nodes, distance_matrix, vehicle.capacity,
                                  conf.seed, conf.eval, conf.better);
+
     NodeList perm = flatten_to_perm(s, nodes);
+
     Solution decoded =
         split_vrptw(perm, nodes, distance_matrix, vehicle.capacity);
-    // shouldn't happen but just in case
+
+    // shouldn't happen but just in case :)
     if (decoded.routes.empty()) {
       continue;
     }
+
     Cost c = cost(decoded);
     population.push_back(Individual{std::move(perm), std::move(decoded), c});
+  }
+
+  if (population.size() < population_size) {
+    NodeList base;
+    base.reserve(nodes.size() - 1);
+    for (size_t i = 1; i < nodes.size(); ++i) {
+      base.push_back((int)i);
+    }
+
+    while (population.size() < population_size) {
+      NodeList perm = base;
+      std::shuffle(perm.begin(), perm.end(), rng);
+
+      Solution decoded =
+          split_vrptw(perm, nodes, distance_matrix, vehicle.capacity);
+
+      if (decoded.routes.empty()) {
+        continue;
+      }
+
+      Cost c = cost(decoded);
+      population.push_back(Individual{std::move(perm), std::move(decoded), c});
+    }
   }
 
   std::optional<Individual> best_greedy;
@@ -922,15 +968,18 @@ int main(int argc, char** argv) {
   const std::chrono::duration<double> elapsed = greedy_end - greedy_start;
   std::println("Initial population / Greedy time: {:.2f} s", elapsed.count());
 
-  int seconds = 60;
-  auto time_limit = std::chrono::seconds(seconds);
-  std::println("Running Genetic Algorithm for {} seconds", seconds);
+  std::chrono::duration<double> time_limit =
+      std::max(std::chrono::duration<double>{0.0},
+               std::chrono::duration<double>{total_seconds} - elapsed);
+
+  std::println("Running Genetic Algorithm for {:.2f} seconds",
+               time_limit.count());
 
   Individual best_ga = run_genetic_algorithm_for_time(
-      nodes, distance_matrix, vehicle.capacity,
-      population,  // initial population
-      population_size, offspring_per_generation, time_limit,
-      std::numeric_limits<size_t>::max(), rng);
+      nodes, distance_matrix, vehicle.capacity, population, population_size,
+      offspring_per_generation,
+      std::chrono::duration_cast<std::chrono::seconds>(time_limit),
+      max_generations, rng);
 
   std::println("Best GA solution found:");
   print_solution(best_ga.solution);
